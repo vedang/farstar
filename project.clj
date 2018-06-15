@@ -8,6 +8,7 @@
                  [org.clojure/tools.logging "0.4.1"]
                  [org.apache.logging.log4j/log4j-api "2.11.0"]
                  [org.apache.logging.log4j/log4j-core "2.11.0"]]
+  :plugins [[lein-codox "0.10.4"]]
   :codox {:source-uri "https://github.com/vedang/clj_fdb/blob/master/{filepath}#L{line}"
           :doc-files ["README.md"]
           :metadata {:doc/format :markdown}}
