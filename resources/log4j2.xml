@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Configuration status="info" strict="true" name="FarstarLogging">
+  <Properties>
+    <Property name="filename">logs/farstar.log</Property>
+  </Properties>
+  <Filter type="ThresholdFilter" level="info"/>
+
+  <Appenders>
+    <Appender type="Console" name="STDOUT">
+      <Layout type="PatternLayout" pattern="[%d] %-5p %c: %m%n"/>
+    </Appender>
+    <Appender type="File" name="File" fileName="${filename}">
+      <Layout type="PatternLayout">
+        <Pattern>[%d] %-5p %c: %m%n</Pattern>
+      </Layout>
+    </Appender>
+  </Appenders>
+
+  <Loggers>
+    <Root level="info">
+      <AppenderRef ref="STDOUT"/>
+      <AppenderRef ref="File"/>
+    </Root>
+  </Loggers>
+
+</Configuration>
