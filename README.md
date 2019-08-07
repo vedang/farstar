@@ -5,10 +5,7 @@ A series of examples / recipes implemented in Clojure against FoundationDB.
 ## Installation
 
 1. Clone this repository.
-2. Currently, installing `clj-fdb` from Clojars is broken. Follow the
-   installation instructions
-   [here](https://github.com/vedang/clj_fdb).
-3. Start a REPL in this repository and open any file in the
+2. Start a REPL in this repository and open any file in the
    `src/farstar/` folder. Follow instructions in the comment block at
    the bottom of the file to play with the code.
 
