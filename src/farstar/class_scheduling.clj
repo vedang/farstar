@@ -5,7 +5,7 @@
             [me.vedang.clj-fdb.transaction :as ftr]
             [me.vedang.clj-fdb.tuple.tuple :as ftup]
             [clojure.string :as cs]
-            [clojure.tools.logging :as ctl])
+            [com.brunobonacci.mulog :as mu])
   (:import [com.apple.foundationdb Database FDB Transaction TransactionContext]
            java.lang.IllegalArgumentException))
 
@@ -39,9 +39,7 @@
   (fc/set tr (ftup/from "attends" class-id student-id) (ftup/from ""))
   (fc/set tr (ftup/from "attends" student-id class-id) (ftup/from ""))
   (fc/set tr (ftup/from "class" class-id) (int (dec seats-left)))
-  (ctl/info (format "Hello %s! You have been signed up for %s!"
-                    student-id
-                    class-id))
+  (mu/log ::signup-student :student-id student-id :class-id class-id)
   class-id)
 
 (defn signup-student
@@ -54,9 +52,7 @@
   (ftr/run db
     (fn [^Transaction tr]
       (if (fc/get tr (ftup/from "attends" class-id student-id))
-        (ctl/info (format "Hello %s! You are already signed up for %s!"
-                          student-id
-                          class-id))
+        (mu/log ::already-signed-up :student-id student-id :class-id class-id)
         (let [seats-left (fc/get tr
                                  (ftup/from "class" class-id)
                                  :valfn (fn [v-ba]
@@ -90,9 +86,7 @@
                            (ftup/from "class" class-id)
                            :valfn (fn [v-ba]
                                     (bs/convert v-ba Integer)))]
-    (ctl/info (format "Hey %s! Sorry to see you go from %s!"
-                      student-id
-                      class-id))
+    (mu/log ::drop-student :student-id student-id :class-id class-id)
     (fc/clear tr (ftup/from "attends" class-id student-id))
     (fc/clear tr (ftup/from "attends" student-id class-id))
     (fc/set tr (ftup/from "class" class-id) (int (inc seats-left)))
@@ -105,9 +99,7 @@
     (fn [^Transaction tr]
       (if (ftup/from "attends" class-id student-id)
         (drop-student* tr student-id class-id)
-        (ctl/info (format "Hello %s! You aren't currently already signed up for %s!"
-                          student-id
-                          class-id))))))
+        (mu/log ::not-signed-up :student-id student-id :class-id class-id)))))
 
 (defn switch-classes
   "Given a student-id and two class-ids, switch classes for the
@@ -173,9 +165,7 @@
                                          (bs/convert v-ba Integer)))]
          (reset-class db class-id (+ attendee-count seats-left))))))
   ([^TransactionContext db class-id available-seats]
-   (ctl/info (format "Resetting class %s. Available seats: %s"
-                     class-id
-                     available-seats))
+   (mu/log ::reset-class :available-seats available-seats :class-id class-id)
    (ftr/run db
      (fn [^Transaction tr]
        (let [attending-sids (keys (fc/get-range tr
@@ -195,7 +185,7 @@
 (defn reset-student
   "Drop the given student from all classes he has signed up for."
   [^TransactionContext db student-id]
-  (ctl/info (format "Resetting student %s." student-id))
+  (mu/log ::reset-student :student-id student-id)
   (ftr/run db
     (fn [^Transaction tr]
       (let [attending-cids (keys (fc/get-range tr
@@ -224,33 +214,40 @@
                  ;; If I have 5 classes, I can't signup for more.
                  (= 5 (count my-classes)) (rand-nth [:drop :switch])
                  :else (rand-nth [:drop :switch :add]))]
-    (ctl/info (format "Performing action %s for %s"
-                      action
-                      student-id))
+    (mu/log ::perform-random-action :student-id student-id :action action)
     (try (case action
            :add (when-let [class-id (signup-student db
                                                     student-id
                                                     (rand-nth all-classes))]
-                  (ctl/info (format "[%s][%s][%s]" :add class-id student-id))
+                  (mu/log ::perform-random-action
+                          :student-id student-id
+                          :action :add
+                          :class-id class-id)
                   (conj my-classes class-id))
            :drop (let [class-id (drop-student db
                                               student-id
                                               (rand-nth my-classes))]
-                   (ctl/info (format "[%s][%s][%s]" :drop class-id student-id))
+                   (mu/log ::perform-random-action
+                           :student-id student-id
+                           :action :drop
+                           :class-id class-id)
                    (remove #{class-id} my-classes))
            :switch (let [existing-class-id (rand-nth my-classes)
                          new-class-id (rand-nth (remove #{existing-class-id}
                                                         all-classes))]
                      (switch-classes db student-id existing-class-id new-class-id)
-                     (ctl/info (format "[%s][%s][%s]"
-                                       :switch
-                                       existing-class-id
-                                       new-class-id
-                                       student-id))
+                     (mu/log ::perform-random-action
+                             :student-id student-id
+                             :action :switch
+                             :existing-class-id existing-class-id
+                             :new-class-id new-class-id)
                      (conj (remove #{existing-class-id} my-classes)
                            new-class-id)))
          (catch Exception e
-           (ctl/info e "My My. We hit some constraint. *INVESTIGATE THIS!*")
+           (mu/log ::perform-random-action
+                   :status :failure
+                   :exception e
+                   :msg "INVESTIGATE THIS")
            my-classes))))
 
 (defn simulate-student
