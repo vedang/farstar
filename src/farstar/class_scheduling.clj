@@ -9,38 +9,37 @@
   (:import [com.apple.foundationdb Database FDB Transaction TransactionContext]
            java.lang.IllegalArgumentException))
 
+(def api-version 510)
+
 (defn available-classes
   "Returns a list of available classes. An available class is one with
   1 or more seats open for enrollment."
   [^TransactionContext db]
-  (reduce-kv (fn [m k v]
-               (if (> v 0)
-                 (assoc m k v)
-                 m))
-             ;; Sorting here just for aesthetic purposes, this is
-             ;; not part of the orignal example.
-             (sorted-map)
-             (fc/get-range db
-                           (-> "class"
-                               ftup/from
-                               ftup/range)
-                           :keyfn (fn [k-ba]
-                                    (-> k-ba
-                                        ftup/from-bytes
-                                        ftup/get-items
-                                        second))
-                           :valfn (fn [v-ba]
-                                    (bs/convert v-ba Integer)))))
+  (mu/trace ::available-classes
+    []
+    (reduce-kv (fn [m k v] (if (> v 0) (assoc m k v) m))
+               ;; Sorting here just for aesthetic purposes, this is
+               ;; not part of the orignal example.
+               (sorted-map)
+               (fc/get-range db
+                             (-> "class" ftup/from ftup/range)
+                             :keyfn #(-> % ftup/from-bytes ftup/get-items second)
+                             :valfn #(bs/convert % Integer)))))
 
 (defn- signup-student*
   "Internal function. Assumes all checks are cleared and we are inside
   a transaction."
   [^Transaction tr student-id class-id seats-left]
-  (fc/set tr (ftup/from "attends" class-id student-id) (ftup/from ""))
-  (fc/set tr (ftup/from "attends" student-id class-id) (ftup/from ""))
-  (fc/set tr (ftup/from "class" class-id) (int (dec seats-left)))
-  (mu/log ::signup-student :student-id student-id :class-id class-id)
-  class-id)
+  (let [seats-left (int (dec seats-left))]
+    (mu/log ::signup-student
+            :level :debug
+            :student-id student-id
+            :class-id class-id
+            :seats-left seats-left)
+    (fc/set tr (ftup/from "attends" class-id student-id) (ftup/from ""))
+    (fc/set tr (ftup/from "attends" student-id class-id) (ftup/from ""))
+    (fc/set tr (ftup/from "class" class-id) seats-left)
+    class-id))
 
 (defn signup-student
   "Signs up a student for a class. Constraints are as follows:
@@ -49,34 +48,34 @@
   - The class should have seats available for enrollment.
   - The student can sign up for a maximum of 5 classes."
   [^TransactionContext db student-id class-id]
-  (ftr/run db
-    (fn [^Transaction tr]
-      (if (fc/get tr (ftup/from "attends" class-id student-id))
-        (mu/log ::already-signed-up :student-id student-id :class-id class-id)
-        (let [seats-left (fc/get tr
-                                 (ftup/from "class" class-id)
-                                 :valfn (fn [v-ba]
-                                          (bs/convert v-ba Integer)))
-              previously-signed-up (->> (ftup/from "attends" student-id)
-                                        ftup/range
-                                        (fc/get-range tr)
-                                        count)]
-          (cond
-            (and seats-left
-                 (pos? seats-left)
-                 (< previously-signed-up 5))
-            (signup-student* tr student-id class-id seats-left)
+  (mu/trace ::signup-student
+    [:student-id student-id
+     :class-id class-id]
+    (ftr/run db
+      (fn [^Transaction tr]
+        (if (fc/get tr (ftup/from "attends" class-id student-id))
+          (mu/log ::already-signed-up :student-id student-id :class-id class-id)
+          (let [seats-left (fc/get tr
+                                   (ftup/from "class" class-id)
+                                   :valfn #(bs/convert % Integer))
+                previously-signed-up (->> (ftup/from "attends" student-id)
+                                          ftup/range
+                                          (fc/get-range tr)
+                                          count)]
+            (cond
+              (and seats-left (pos? seats-left) (< previously-signed-up 5))
+              (signup-student* tr student-id class-id seats-left)
 
-            (>= previously-signed-up 5)
-            (throw (IllegalArgumentException.
-                    (format "Hello %s! You've already signed up for the max number of allowed classes!"
-                            student-id)))
+              (>= previously-signed-up 5)
+              (throw (IllegalArgumentException.
+                      (format "Hello %s! You've already signed up for the max number of allowed classes!"
+                              student-id)))
 
-            :else
-            (throw (IllegalArgumentException.
-                    (format "Sorry %s! No seats remaining in %s!"
-                            student-id
-                            class-id)))))))))
+              :else
+              (throw (IllegalArgumentException.
+                      (format "Sorry %s! No seats remaining in %s!"
+                              student-id
+                              class-id))))))))))
 
 (defn- drop-student*
   "Internal function. Assumes all checks are cleared and we are inside
@@ -84,9 +83,12 @@
   [^Transaction tr student-id class-id]
   (let [seats-left (fc/get tr
                            (ftup/from "class" class-id)
-                           :valfn (fn [v-ba]
-                                    (bs/convert v-ba Integer)))]
-    (mu/log ::drop-student :student-id student-id :class-id class-id)
+                           :valfn #(bs/convert % Integer))]
+    (mu/log ::drop-student
+            :level :debug
+            :student-id student-id
+            :class-id class-id
+            :seats-left seats-left)
     (fc/clear tr (ftup/from "attends" class-id student-id))
     (fc/clear tr (ftup/from "attends" student-id class-id))
     (fc/set tr (ftup/from "class" class-id) (int (inc seats-left)))
@@ -95,11 +97,20 @@
 (defn drop-student
   "Drops a student from a class, if he is signed up for it."
   [^TransactionContext db student-id class-id]
-  (ftr/run db
-    (fn [^Transaction tr]
-      (if (ftup/from "attends" class-id student-id)
-        (drop-student* tr student-id class-id)
-        (mu/log ::not-signed-up :student-id student-id :class-id class-id)))))
+  (mu/trace ::drop-student
+    [:student-id student-id
+     :class-id class-id]
+    (ftr/run db
+      (fn [^Transaction tr]
+        (if (fc/get tr (ftup/from "attends" class-id student-id))
+          (if (pos? (fc/get tr (ftup/from "class" class-id)
+                            :valfn #(bs/convert % Integer)))
+            (drop-student* tr student-id class-id)
+            (mu/log ::drop-student :level :error :class-id class-id
+                    :message "There is a bug in the code."))
+          (mu/log ::not-signed-up
+                  :student-id student-id
+                  :class-id class-id))))))
 
 (defn switch-classes
   "Given a student-id and two class-ids, switch classes for the
@@ -108,17 +119,24 @@
   - Don't drop the existing class unless the student has successfully
     signed up for the new class."
   [^TransactionContext db student-id old-class-id new-class-id]
-  (ftr/run db
-    (fn [^Transaction tr]
-      (drop-student tr student-id old-class-id)
-      (signup-student tr student-id new-class-id))))
+  (mu/trace ::switch-classes
+    [:student-id student-id
+     :old-class-id old-class-id
+     :new-class-id new-class-id]
+    (ftr/run db
+      (fn [^Transaction tr]
+        (drop-student tr student-id old-class-id)
+        (signup-student tr student-id new-class-id)))))
 
 (defn add-class
   "Used to populate the database's class list. Adds a new class to the
   list of available classes and sets the number of available seats for
   the class."
-  [^TransactionContext db classname available-seats]
-  (fc/set db (ftup/from "class" classname) (int available-seats)))
+  [^TransactionContext db class-id available-seats]
+  (mu/trace ::add-class
+    [:class-id class-id
+     :seats-left available-seats]
+    (fc/set db (ftup/from "class" class-id) (int available-seats))))
 
 (defn init-db
   "Helper function to initialize the db with a bunch of classnames.
@@ -129,15 +147,9 @@
   (ftr/run db
     (fn [^Transaction tr]
       ;; Clear list of who attends which class
-      (->> "attends"
-           ftup/from
-           ftup/range
-           (fc/clear-range tr))
+      (->> "attends" ftup/from ftup/range (fc/clear-range tr))
       ;; Clear list of classes
-      (->> "class"
-           ftup/from
-           ftup/range
-           (fc/clear-range tr))
+      (->> "class" ftup/from ftup/range (fc/clear-range tr))
       ;; Add list of classes as given to us
       (doseq [c classnames]
         (add-class tr c (int 10))))))
@@ -151,104 +163,111 @@
 
   *NOTE*: This is not part of the original example."
   ([^TransactionContext db class-id]
-   (ftr/run db
-     (fn [^Transaction tr]
-       (let [attendance-range-key (ftup/from "attends" class-id)
-             class-key (ftup/from "class" class-id)
-             attendee-count (->> attendance-range-key
-                                 ftup/range
-                                 (fc/get-range tr)
-                                 count)
-             seats-left (fc/get tr
-                                class-key
-                                :valfn (fn [v-ba]
-                                         (bs/convert v-ba Integer)))]
-         (reset-class db class-id (+ attendee-count seats-left))))))
+   (mu/trace ::reset-class
+     [:class-id class-id]
+     (ftr/run db
+       (fn [^Transaction tr]
+         (let [attendance-range-key (ftup/from "attends" class-id)
+               class-key (ftup/from "class" class-id)
+               attendee-count (->> attendance-range-key
+                                   ftup/range
+                                   (fc/get-range tr)
+                                   count)
+               seats-left (fc/get tr
+                                  class-key
+                                  :valfn #(bs/convert % Integer))]
+           (reset-class db class-id (+ attendee-count seats-left)))))))
   ([^TransactionContext db class-id available-seats]
-   (mu/log ::reset-class :available-seats available-seats :class-id class-id)
-   (ftr/run db
-     (fn [^Transaction tr]
-       (let [attending-sids (keys (fc/get-range tr
-                                                (-> "attends"
-                                                    (ftup/from class-id)
-                                                    ftup/range)
-                                                :keyfn (fn [k-ba]
-                                                         (->> k-ba
-                                                              ftup/from-bytes
-                                                              ftup/get-items
-                                                              (drop 2)
-                                                              first))))]
-         (doseq [s attending-sids]
+   (mu/trace ::reset-class
+     [:available-seats available-seats
+      :class-id class-id]
+     (ftr/run db
+       (fn [^Transaction tr]
+         (doseq [s (-> tr
+                       (fc/get-range
+                        (-> "attends"
+                            (ftup/from class-id)
+                            ftup/range)
+                        :keyfn #(->> %
+                                    ftup/from-bytes
+                                    ftup/get-items
+                                    (drop 2)
+                                    first))
+                       keys)]
            (drop-student tr s class-id))
          (add-class tr class-id (int available-seats)))))))
 
 (defn reset-student
   "Drop the given student from all classes he has signed up for."
   [^TransactionContext db student-id]
-  (mu/log ::reset-student :student-id student-id)
-  (ftr/run db
-    (fn [^Transaction tr]
-      (let [attending-cids (keys (fc/get-range tr
-                                               (-> "attends"
-                                                   (ftup/from student-id)
-                                                   ftup/range)
-                                               :keyfn (fn [k-ba]
-                                                        (->> k-ba
-                                                             ftup/from-bytes
-                                                             ftup/get-items
-                                                             (drop 2)
-                                                             first))))]
-        (doseq [c attending-cids]
+  (mu/trace ::reset-student
+    [:student-id student-id]
+    (ftr/run db
+      (fn [^Transaction tr]
+        (doseq [c (-> tr
+                      (fc/get-range
+                       (-> "attends"
+                           (ftup/from student-id)
+                           ftup/range)
+                       :keyfn #(->> %
+                                   ftup/from-bytes
+                                   ftup/get-items
+                                   (drop 2)
+                                   first))
+                      keys)]
           (drop-student tr student-id c))))))
 
+;;; Testing
 
 (defn- perform-random-action
   "Perform random actions. This function is going to respect the
   constraints from it's point of view. The magic is whether FDB can
   help us respect the constraints over a multi-threaded run."
   [^Database db student-id my-classes]
-  (let [all-classes (keys (available-classes db))
-        action (cond
-                 ;; If I have no classes, I need to signup first.
-                 (= 0 (count my-classes)) :add
-                 ;; If I have 5 classes, I can't signup for more.
-                 (= 5 (count my-classes)) (rand-nth [:drop :switch])
-                 :else (rand-nth [:drop :switch :add]))]
-    (mu/log ::perform-random-action :student-id student-id :action action)
-    (try (case action
-           :add (when-let [class-id (signup-student db
-                                                    student-id
-                                                    (rand-nth all-classes))]
-                  (mu/log ::perform-random-action
-                          :student-id student-id
-                          :action :add
-                          :class-id class-id)
-                  (conj my-classes class-id))
-           :drop (let [class-id (drop-student db
-                                              student-id
-                                              (rand-nth my-classes))]
-                   (mu/log ::perform-random-action
-                           :student-id student-id
-                           :action :drop
-                           :class-id class-id)
-                   (remove #{class-id} my-classes))
-           :switch (let [existing-class-id (rand-nth my-classes)
-                         new-class-id (rand-nth (remove #{existing-class-id}
-                                                        all-classes))]
-                     (switch-classes db student-id existing-class-id new-class-id)
+  (mu/trace ::perform-random-action
+    [:student-id student-id
+     :classes my-classes]
+    (let [all-classes (keys (available-classes db))
+          action (cond
+                   ;; If I have no classes, I need to signup first.
+                   (= 0 (count my-classes)) :add
+                   ;; If I have 5 classes, I can't signup for more.
+                   (= 5 (count my-classes)) (rand-nth [:drop :switch])
+                   :else (rand-nth [:drop :switch :add]))]
+      (try (case action
+             :add (when-let [class-id (signup-student db
+                                                      student-id
+                                                      (rand-nth all-classes))]
+                    (mu/log ::perform-random-action
+                            :student-id student-id
+                            :action :add
+                            :class-id class-id)
+                    (conj my-classes class-id))
+             :drop (let [class-id (drop-student db
+                                                student-id
+                                                (rand-nth my-classes))]
                      (mu/log ::perform-random-action
                              :student-id student-id
-                             :action :switch
-                             :existing-class-id existing-class-id
-                             :new-class-id new-class-id)
-                     (conj (remove #{existing-class-id} my-classes)
-                           new-class-id)))
-         (catch Exception e
-           (mu/log ::perform-random-action
-                   :status :failure
-                   :exception e
-                   :msg "INVESTIGATE THIS")
-           my-classes))))
+                             :action :drop
+                             :class-id class-id)
+                     (remove #{class-id} my-classes))
+             :switch (let [existing-class-id (rand-nth my-classes)
+                           new-class-id (rand-nth (remove #{existing-class-id}
+                                                          all-classes))]
+                       (switch-classes db student-id existing-class-id new-class-id)
+                       (mu/log ::perform-random-action
+                               :student-id student-id
+                               :action :switch
+                               :existing-class-id existing-class-id
+                               :new-class-id new-class-id)
+                       (conj (remove #{existing-class-id} my-classes)
+                             new-class-id)))
+           (catch Exception e
+             (mu/log ::perform-random-action
+                     :status :failure
+                     :exception e
+                     :msg "INVESTIGATE THIS")
+             my-classes)))))
 
 (defn simulate-student
   "Simulates a student represented by `sid`. The student
@@ -259,34 +278,111 @@
   - `switch`: switch from an existing class to a different
     class (chosen at random)."
   [sid ops-per-student]
-  (let [student-id (str "Student: " sid)
-        fdb (cfdb/select-api-version 510)]
-    (with-open [db (cfdb/open fdb)]
-      (reduce (fn [my-classes _]
-                (perform-random-action db student-id my-classes))
-              ;; Pass this student's current classes in.
-              (keys (fc/get-range db
-                                  (-> "attends"
-                                      (ftup/from student-id)
-                                      ftup/range)
-                                  :keyfn (fn [k-ba]
-                                           (->> k-ba
-                                                ftup/from-bytes
-                                                ftup/get-items
-                                                (drop 2)
-                                                first))))
-              (range ops-per-student)))))
+  (mu/trace ::simulate-student
+    [:student-id (str "Student: " sid)
+     :ops ops-per-student]
+    (let [student-id (str "Student: " sid)
+          fdb (cfdb/select-api-version api-version)]
+      (with-open [db (cfdb/open fdb)]
+        (reduce (fn [my-classes _]
+                  (perform-random-action db student-id my-classes))
+                ;; Pass this student's current classes in.
+                (keys (fc/get-range db
+                                    (-> "attends"
+                                        (ftup/from student-id)
+                                        ftup/range)
+                                    :keyfn (fn [k-ba]
+                                             (->> k-ba
+                                                  ftup/from-bytes
+                                                  ftup/get-items
+                                                  (drop 2)
+                                                  first))))
+                (range ops-per-student))))))
 
 (defn run-sim
   "Runs the `simulate-student` function across multiple threads."
   [num-of-students ops-per-student]
-  (let [futures (map (fn [i] (future (simulate-student i ops-per-student)))
-                     (range num-of-students))]
-    (mapv deref (shuffle futures))))
+  (mu/trace ::run-sim
+    [:num-of-students num-of-students
+     :ops-per-student ops-per-student]
+    (let [futures (map (fn [i] (future (simulate-student i ops-per-student)))
+                       (range num-of-students))]
+      (mapv deref (shuffle futures)))))
 
 (comment
+  ;; Global context (app-name) is needed for the Zipkin / Jaeger
+  ;; publisher for tracing.
+  (mu/set-global-context!
+   {:app-name "farstar", :version "0.1.0", :env "local"})
+
+  ;; This will initialize our publishers. Mulog logs will show up only
+  ;; after this is evaluated.
+  (def stop-builtin-publishers
+    (mu/start-publisher!
+     {:type :multi
+      :publishers
+      [{:type :console
+        :pretty? true
+        :transform (fn [es] (remove (comp (partial = :debug) :level) es))}
+       {:type :simple-file :filename "./logs/mulog_events.log"}]}))
+
+  ;; If you want to stop publishers
+  (stop-builtin-publishers)
+
+  ;; Start a Zipkin publisher with the appropriate configuration
+  (def stop-zipkin-publisher
+    (mu/start-publisher!
+     {:type :zipkin
+
+      ;; Zipkin endpoint (REQUIRED)
+      :url  "http://localhost:9411/"
+
+      ;; the maximum number of events which can be sent in a single
+      ;; batch request to Zipkin
+      :max-items     5000
+
+      ;; Interval in milliseconds between publish requests.
+      ;; μ/log will try to send the records to Zipkin
+      ;; with the interval specified.
+      :publish-delay 5000
+
+      ;; a function to apply to the sequence of events before publishing.
+      ;; This transformation function can be used to filter, transform,
+      ;; anonymise events before they are published to a external system.
+      ;; by defatult there is no transformation.  (since v0.1.8)
+      :transform identity
+      }))
+
+  ;; Stop the Zipkin publisher
+  (stop-zipkin-publisher)
+
+  (def stop-jaeger-publisher
+    (mu/start-publisher!
+     {:type :zipkin
+
+      ;; Zipkin endpoint (REQUIRED)
+      :url  "http://localhost:9412/"
+
+      ;; the maximum number of events which can be sent in a single
+      ;; batch request to Zipkin
+      :max-items     5000
+
+      ;; Interval in milliseconds between publish requests.
+      ;; μ/log will try to send the records to Zipkin
+      ;; with the interval specified.
+      :publish-delay 5000
+
+      ;; a function to apply to the sequence of events before publishing.
+      ;; This transformation function can be used to filter, transform,
+      ;; anonymise events before they are published to a external system.
+      ;; by defatult there is no transformation.  (since v0.1.8)
+      :transform identity
+      }))
+
+  (stop-jaeger-publisher)
+
   ;; Create classes for fun and profit
-  (let [fdb (cfdb/select-api-version 510)
+  (let [fdb (cfdb/select-api-version api-version)
         class-levels ["intro" "for dummies" "remedial"
                       "101" "201" "301"
                       "mastery" "lab" "seminar"]
@@ -307,32 +403,32 @@
       (init-db db classnames)))
 
   ;; List all the available classes
-  (let [fdb (cfdb/select-api-version 510)]
+  (let [fdb (cfdb/select-api-version api-version)]
     (with-open [db (cfdb/open fdb)]
       (available-classes db)))
 
   ;; Sign-up a student for a class
-  (let [fdb (cfdb/select-api-version 510)]
+  (let [fdb (cfdb/select-api-version api-version)]
     (with-open [db (cfdb/open fdb)]
       (signup-student db "student-1" "101 alg 10:00")))
 
   ;; Switch classes for a student
-  (let [fdb (cfdb/select-api-version 510)]
+  (let [fdb (cfdb/select-api-version api-version)]
     (with-open [db (cfdb/open fdb)]
       (switch-classes db "student-1" "101 alg 10:00" "101 alg 12:00")))
 
   ;; Drop a student from a class
-  (let [fdb (cfdb/select-api-version 510)]
+  (let [fdb (cfdb/select-api-version api-version)]
     (with-open [db (cfdb/open fdb)]
       (drop-student db "student-1" "101 alg 12:00")))
 
   ;; Reset the state of the class
-  (let [fdb (cfdb/select-api-version 510)]
+  (let [fdb (cfdb/select-api-version api-version)]
     (with-open [db (cfdb/open fdb)]
-      (reset-class db "101 alg 12:00")))
+      (reset-class db "101 alg 12:00" 10)))
 
   ;; Reset the state of a student
-  (let [fdb (cfdb/select-api-version 510)]
+  (let [fdb (cfdb/select-api-version api-version)]
     (with-open [db (cfdb/open fdb)]
       (reset-student db "student-1")))
 
