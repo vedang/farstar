@@ -9,7 +9,9 @@
   (:import [com.apple.foundationdb Database FDB Transaction TransactionContext]
            java.lang.IllegalArgumentException))
 
-(def api-version 510)
+(def api-version 620)
+
+(load "util")
 
 (defn available-classes
   "Returns a list of available classes. An available class is one with
@@ -23,8 +25,8 @@
                (sorted-map)
                (fc/get-range db
                              (-> "class" ftup/from ftup/range)
-                             :keyfn #(-> % ftup/from-bytes ftup/get-items second)
-                             :valfn #(bs/convert % Integer)))))
+                             #(-> % ftup/from-bytes ftup/get-items second)
+                             #(bs/convert % Integer)))))
 
 (defn- signup-student*
   "Internal function. Assumes all checks are cleared and we are inside
@@ -38,7 +40,7 @@
             :seats-left seats-left)
     (fc/set tr (ftup/from "attends" class-id student-id) (ftup/from ""))
     (fc/set tr (ftup/from "attends" student-id class-id) (ftup/from ""))
-    (fc/set tr (ftup/from "class" class-id) seats-left)
+    (fc/set tr (ftup/from "class" class-id) (bs/to-byte-array seats-left))
     class-id))
 
 (defn signup-student
@@ -53,15 +55,15 @@
      :class-id class-id]
     (ftr/run db
       (fn [^Transaction tr]
-        (if (fc/get tr (ftup/from "attends" class-id student-id))
+        (if (fc/get tr (ftup/from "attends" class-id student-id) identity)
           (mu/log ::already-signed-up :student-id student-id :class-id class-id)
           (let [seats-left (fc/get tr
                                    (ftup/from "class" class-id)
-                                   :valfn #(bs/convert % Integer))
-                previously-signed-up (->> (ftup/from "attends" student-id)
-                                          ftup/range
-                                          (fc/get-range tr)
-                                          count)]
+                                   #(bs/convert % Integer))
+                previously-signed-up (count (fc/get-range tr
+                                                          (ftup/range (ftup/from "attends" student-id))
+                                                          identity
+                                                          identity))]
             (cond
               (and seats-left (pos? seats-left) (< previously-signed-up 5))
               (signup-student* tr student-id class-id seats-left)
@@ -83,7 +85,7 @@
   [^Transaction tr student-id class-id]
   (let [seats-left (fc/get tr
                            (ftup/from "class" class-id)
-                           :valfn #(bs/convert % Integer))]
+                           #(bs/convert % Integer))]
     (mu/log ::drop-student
             :level :debug
             :student-id student-id
@@ -91,7 +93,9 @@
             :seats-left seats-left)
     (fc/clear tr (ftup/from "attends" class-id student-id))
     (fc/clear tr (ftup/from "attends" student-id class-id))
-    (fc/set tr (ftup/from "class" class-id) (int (inc seats-left)))
+    (fc/set tr
+            (ftup/from "class" class-id)
+            (bs/to-byte-array (int (inc seats-left))))
     class-id))
 
 (defn drop-student
@@ -102,12 +106,8 @@
      :class-id class-id]
     (ftr/run db
       (fn [^Transaction tr]
-        (if (fc/get tr (ftup/from "attends" class-id student-id))
-          (if (pos? (fc/get tr (ftup/from "class" class-id)
-                            :valfn #(bs/convert % Integer)))
-            (drop-student* tr student-id class-id)
-            (mu/log ::drop-student :level :error :class-id class-id
-                    :message "There is a bug in the code."))
+        (if (fc/get tr (ftup/from "attends" class-id student-id) identity)
+          (drop-student* tr student-id class-id)
           (mu/log ::not-signed-up
                   :student-id student-id
                   :class-id class-id))))))
@@ -136,7 +136,9 @@
   (mu/trace ::add-class
     [:class-id class-id
      :seats-left available-seats]
-    (fc/set db (ftup/from "class" class-id) (int available-seats))))
+    (fc/set db
+            (ftup/from "class" class-id)
+            (bs/to-byte-array (int available-seats)))))
 
 (defn init-db
   "Helper function to initialize the db with a bunch of classnames.
@@ -169,13 +171,13 @@
        (fn [^Transaction tr]
          (let [attendance-range-key (ftup/from "attends" class-id)
                class-key (ftup/from "class" class-id)
-               attendee-count (->> attendance-range-key
-                                   ftup/range
-                                   (fc/get-range tr)
-                                   count)
+               attendee-count (count (fc/get-range tr
+                                                   (ftup/range attendance-range-key)
+                                                   identity
+                                                   identity))
                seats-left (fc/get tr
                                   class-key
-                                  :valfn #(bs/convert % Integer))]
+                                  #(bs/convert % Integer))]
            (reset-class db class-id (+ attendee-count seats-left)))))))
   ([^TransactionContext db class-id available-seats]
    (mu/trace ::reset-class
@@ -183,17 +185,14 @@
       :class-id class-id]
      (ftr/run db
        (fn [^Transaction tr]
-         (doseq [s (-> tr
-                       (fc/get-range
-                        (-> "attends"
-                            (ftup/from class-id)
-                            ftup/range)
-                        :keyfn #(->> %
-                                    ftup/from-bytes
-                                    ftup/get-items
-                                    (drop 2)
-                                    first))
-                       keys)]
+         (doseq [s (keys (fc/get-range tr
+                                       (ftup/range (ftup/from "attends" class-id))
+                                       #(->> %
+                                            ftup/from-bytes
+                                            ftup/get-items
+                                            (drop 2)
+                                            first)
+                                       identity))]
            (drop-student tr s class-id))
          (add-class tr class-id (int available-seats)))))))
 
@@ -204,17 +203,14 @@
     [:student-id student-id]
     (ftr/run db
       (fn [^Transaction tr]
-        (doseq [c (-> tr
-                      (fc/get-range
-                       (-> "attends"
-                           (ftup/from student-id)
-                           ftup/range)
-                       :keyfn #(->> %
-                                   ftup/from-bytes
-                                   ftup/get-items
-                                   (drop 2)
-                                   first))
-                      keys)]
+        (doseq [c (keys (fc/get-range tr
+                                      (ftup/range (ftup/from "attends" student-id))
+                                      #(->> %
+                                           ftup/from-bytes
+                                           ftup/get-items
+                                           (drop 2)
+                                           first)
+                                      identity))]
           (drop-student tr student-id c))))))
 
 ;;; Testing
@@ -226,7 +222,7 @@
   [^Database db student-id my-classes]
   (mu/trace ::perform-random-action
     [:student-id student-id
-     :classes my-classes]
+     :classes (seq my-classes)]
     (let [all-classes (keys (available-classes db))
           action (cond
                    ;; If I have no classes, I need to signup first.
@@ -291,12 +287,12 @@
                                     (-> "attends"
                                         (ftup/from student-id)
                                         ftup/range)
-                                    :keyfn (fn [k-ba]
-                                             (->> k-ba
-                                                  ftup/from-bytes
-                                                  ftup/get-items
-                                                  (drop 2)
-                                                  first))))
+                                    #(->> %
+                                          ftup/from-bytes
+                                          ftup/get-items
+                                          (drop 2)
+                                          first)
+                                    identity))
                 (range ops-per-student))))))
 
 (defn run-sim
@@ -328,33 +324,6 @@
 
   ;; If you want to stop publishers
   (stop-builtin-publishers)
-
-  ;; Start a Zipkin publisher with the appropriate configuration
-  (def stop-zipkin-publisher
-    (mu/start-publisher!
-     {:type :zipkin
-
-      ;; Zipkin endpoint (REQUIRED)
-      :url  "http://localhost:9411/"
-
-      ;; the maximum number of events which can be sent in a single
-      ;; batch request to Zipkin
-      :max-items     5000
-
-      ;; Interval in milliseconds between publish requests.
-      ;; μ/log will try to send the records to Zipkin
-      ;; with the interval specified.
-      :publish-delay 5000
-
-      ;; a function to apply to the sequence of events before publishing.
-      ;; This transformation function can be used to filter, transform,
-      ;; anonymise events before they are published to a external system.
-      ;; by defatult there is no transformation.  (since v0.1.8)
-      :transform identity
-      }))
-
-  ;; Stop the Zipkin publisher
-  (stop-zipkin-publisher)
 
   (def stop-jaeger-publisher
     (mu/start-publisher!
