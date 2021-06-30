@@ -1,15 +1,18 @@
 (ns farstar.class-scheduling
   (:require [byte-streams :as bs]
+            [clojure.string :as cs]
+            [com.brunobonacci.mulog :as mu]
             [me.vedang.clj-fdb.core :as fc]
             [me.vedang.clj-fdb.FDB :as cfdb]
             [me.vedang.clj-fdb.transaction :as ftr]
             [me.vedang.clj-fdb.tuple.tuple :as ftup]
-            [clojure.string :as cs]
-            [com.brunobonacci.mulog :as mu])
-  (:import [com.apple.foundationdb Database FDB Transaction TransactionContext]
+            [me.vedang.clj-fdb.subspace.subspace :as fsub])
+  (:import [com.apple.foundationdb Database Transaction TransactionContext]
            java.lang.IllegalArgumentException))
 
 (def api-version 620)
+(def fdb (cfdb/select-api-version api-version))
+(def cs-subspace (fsub/create (ftup/from "class_scheduling")))
 
 (load "util")
 
@@ -24,8 +27,9 @@
                ;; not part of the orignal example.
                (sorted-map)
                (fc/get-range db
-                             (-> "class" ftup/from ftup/range)
-                             #(-> % ftup/from-bytes ftup/get-items second)
+                             cs-subspace
+                             (ftup/from "class")
+                             (comp second ftup/get-items (partial fsub/unpack cs-subspace))
                              #(bs/convert % Integer)))))
 
 (defn- signup-student*
@@ -38,9 +42,18 @@
             :student-id student-id
             :class-id class-id
             :seats-left seats-left)
-    (fc/set tr (ftup/from "attends" class-id student-id) (ftup/from ""))
-    (fc/set tr (ftup/from "attends" student-id class-id) (ftup/from ""))
-    (fc/set tr (ftup/from "class" class-id) (bs/to-byte-array seats-left))
+    (fc/set tr
+            cs-subspace
+            (ftup/from "attends" class-id student-id)
+            (ftup/from ""))
+    (fc/set tr
+            cs-subspace
+            (ftup/from "attends" student-id class-id)
+            (ftup/from ""))
+    (fc/set tr
+            cs-subspace
+            (ftup/from "class" class-id)
+            (bs/to-byte-array seats-left))
     class-id))
 
 (defn signup-student
@@ -55,13 +68,18 @@
      :class-id class-id]
     (ftr/run db
       (fn [^Transaction tr]
-        (if (fc/get tr (ftup/from "attends" class-id student-id) identity)
+        (if (fc/get tr
+                    cs-subspace
+                    (ftup/from "attends" class-id student-id)
+                    identity)
           (mu/log ::already-signed-up :student-id student-id :class-id class-id)
           (let [seats-left (fc/get tr
+                                   cs-subspace
                                    (ftup/from "class" class-id)
                                    #(bs/convert % Integer))
                 previously-signed-up (count (fc/get-range tr
-                                                          (ftup/range (ftup/from "attends" student-id))
+                                                          cs-subspace
+                                                          (ftup/from "attends" student-id)
                                                           identity
                                                           identity))]
             (cond
@@ -84,6 +102,7 @@
   a transaction."
   [^Transaction tr student-id class-id]
   (let [seats-left (fc/get tr
+                           cs-subspace
                            (ftup/from "class" class-id)
                            #(bs/convert % Integer))]
     (mu/log ::drop-student
@@ -91,12 +110,14 @@
             :student-id student-id
             :class-id class-id
             :seats-left seats-left)
-    (fc/clear tr (ftup/from "attends" class-id student-id))
-    (fc/clear tr (ftup/from "attends" student-id class-id))
+    (fc/clear tr cs-subspace (ftup/from "attends" class-id student-id))
+    (fc/clear tr cs-subspace (ftup/from "attends" student-id class-id))
     (fc/set tr
+            cs-subspace
             (ftup/from "class" class-id)
             (bs/to-byte-array (int (inc seats-left))))
     class-id))
+
 
 (defn drop-student
   "Drops a student from a class, if he is signed up for it."
@@ -106,11 +127,15 @@
      :class-id class-id]
     (ftr/run db
       (fn [^Transaction tr]
-        (if (fc/get tr (ftup/from "attends" class-id student-id) identity)
+        (if (fc/get tr
+                    cs-subspace
+                    (ftup/from "attends" class-id student-id)
+                    identity)
           (drop-student* tr student-id class-id)
           (mu/log ::not-signed-up
                   :student-id student-id
                   :class-id class-id))))))
+
 
 (defn switch-classes
   "Given a student-id and two class-ids, switch classes for the
@@ -137,6 +162,7 @@
     [:class-id class-id
      :seats-left available-seats]
     (fc/set db
+            cs-subspace
             (ftup/from "class" class-id)
             (bs/to-byte-array (int available-seats)))))
 
@@ -149,12 +175,13 @@
   (ftr/run db
     (fn [^Transaction tr]
       ;; Clear list of who attends which class
-      (->> "attends" ftup/from ftup/range (fc/clear-range tr))
+      (fc/clear-range tr cs-subspace (ftup/from "attends"))
       ;; Clear list of classes
-      (->> "class" ftup/from ftup/range (fc/clear-range tr))
+      (fc/clear-range tr cs-subspace (ftup/from "class"))
       ;; Add list of classes as given to us
       (doseq [c classnames]
         (add-class tr c (int 10))))))
+
 
 (defn reset-class
   "Helper function to remove all attendees from a class and reset it.
@@ -169,13 +196,15 @@
      [:class-id class-id]
      (ftr/run db
        (fn [^Transaction tr]
-         (let [attendance-range-key (ftup/from "attends" class-id)
+         (let [attendance-key (ftup/from "attends" class-id)
                class-key (ftup/from "class" class-id)
                attendee-count (count (fc/get-range tr
-                                                   (ftup/range attendance-range-key)
+                                                   cs-subspace
+                                                   attendance-key
                                                    identity
                                                    identity))
                seats-left (fc/get tr
+                                  cs-subspace
                                   class-key
                                   #(bs/convert % Integer))]
            (reset-class db class-id (+ attendee-count seats-left)))))))
@@ -186,15 +215,17 @@
      (ftr/run db
        (fn [^Transaction tr]
          (doseq [s (keys (fc/get-range tr
-                                       (ftup/range (ftup/from "attends" class-id))
+                                       cs-subspace
+                                       (ftup/from "attends" class-id)
                                        #(->> %
-                                            ftup/from-bytes
-                                            ftup/get-items
-                                            (drop 2)
-                                            first)
+                                             (fsub/unpack cs-subspace)
+                                             ftup/get-items
+                                             (drop 2)
+                                             first)
                                        identity))]
            (drop-student tr s class-id))
          (add-class tr class-id (int available-seats)))))))
+
 
 (defn reset-student
   "Drop the given student from all classes he has signed up for."
@@ -204,9 +235,10 @@
     (ftr/run db
       (fn [^Transaction tr]
         (doseq [c (keys (fc/get-range tr
-                                      (ftup/range (ftup/from "attends" student-id))
+                                      cs-subspace
+                                      (ftup/from "attends" student-id)
                                       #(->> %
-                                           ftup/from-bytes
+                                           (fsub/unpack cs-subspace)
                                            ftup/get-items
                                            (drop 2)
                                            first)
@@ -265,6 +297,7 @@
                      :msg "INVESTIGATE THIS")
              my-classes)))))
 
+
 (defn simulate-student
   "Simulates a student represented by `sid`. The student
   performs `ops-per-student` actions. Actions are any of:
@@ -277,23 +310,22 @@
   (mu/trace ::simulate-student
     [:student-id (str "Student: " sid)
      :ops ops-per-student]
-    (let [student-id (str "Student: " sid)
-          fdb (cfdb/select-api-version api-version)]
+    (let [student-id (str "Student: " sid)]
       (with-open [db (cfdb/open fdb)]
         (reduce (fn [my-classes _]
                   (perform-random-action db student-id my-classes))
                 ;; Pass this student's current classes in.
                 (keys (fc/get-range db
-                                    (-> "attends"
-                                        (ftup/from student-id)
-                                        ftup/range)
+                                    cs-subspace
+                                    (ftup/from "attends" student-id)
                                     #(->> %
-                                          ftup/from-bytes
+                                          (fsub/unpack cs-subspace)
                                           ftup/get-items
                                           (drop 2)
                                           first)
                                     identity))
                 (range ops-per-student))))))
+
 
 (defn run-sim
   "Runs the `simulate-student` function across multiple threads."
@@ -304,6 +336,7 @@
     (let [futures (map (fn [i] (future (simulate-student i ops-per-student)))
                        (range num-of-students))]
       (mapv deref (shuffle futures)))))
+
 
 (comment
   ;; Global context (app-name) is needed for the Zipkin / Jaeger
@@ -351,8 +384,7 @@
   (stop-jaeger-publisher)
 
   ;; Create classes for fun and profit
-  (let [fdb (cfdb/select-api-version api-version)
-        class-levels ["intro" "for dummies" "remedial"
+  (let [class-levels ["intro" "for dummies" "remedial"
                       "101" "201" "301"
                       "mastery" "lab" "seminar"]
         class-types ["chem" "bio" "cs"
@@ -372,38 +404,35 @@
       (init-db db classnames)))
 
   ;; List all the available classes
-  (let [fdb (cfdb/select-api-version api-version)]
-    (with-open [db (cfdb/open fdb)]
-      (available-classes db)))
+  (with-open [db (cfdb/open fdb)]
+    (available-classes db))
 
   ;; Sign-up a student for a class
-  (let [fdb (cfdb/select-api-version api-version)]
-    (with-open [db (cfdb/open fdb)]
-      (signup-student db "student-1" "101 alg 10:00")))
+  (with-open [db (cfdb/open fdb)]
+    (signup-student db "student-1" "101 alg 10:00"))
 
   ;; Switch classes for a student
-  (let [fdb (cfdb/select-api-version api-version)]
-    (with-open [db (cfdb/open fdb)]
-      (switch-classes db "student-1" "101 alg 10:00" "101 alg 12:00")))
+  (with-open [db (cfdb/open fdb)]
+    (switch-classes db "student-1" "101 alg 10:00" "101 alg 12:00"))
 
   ;; Drop a student from a class
-  (let [fdb (cfdb/select-api-version api-version)]
-    (with-open [db (cfdb/open fdb)]
-      (drop-student db "student-1" "101 alg 12:00")))
+  (with-open [db (cfdb/open fdb)]
+    (drop-student db "student-1" "101 alg 12:00"))
 
   ;; Reset the state of the class
-  (let [fdb (cfdb/select-api-version api-version)]
-    (with-open [db (cfdb/open fdb)]
-      (reset-class db "101 alg 12:00" 10)))
+  (with-open [db (cfdb/open fdb)]
+    (reset-class db "101 alg 12:00" 10))
 
   ;; Reset the state of a student
-  (let [fdb (cfdb/select-api-version api-version)]
-    (with-open [db (cfdb/open fdb)]
-      (reset-student db "student-1")))
+  (with-open [db (cfdb/open fdb)]
+    (reset-student db "student-1"))
 
   ;; Simulate actions for a single student
   (simulate-student "1" 10)
 
   ;; Simulate actions for a bunch of students signing up for a bunch
   ;; of classes
-  (run-sim 10 10))
+  (run-sim 10 10)
+
+  ;; Refer to the corresponding test namespace for tests against the sim
+  )
