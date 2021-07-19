@@ -1,4 +1,6 @@
 (ns farstar.time-series
+  "Implements the Time Series example from FDB documentation, as
+explained at : https://apple.github.io/foundationdb/time-series.html"
   (:require [byte-streams :as bs]
             [clojure.spec.alpha :as s]
             [clojure.spec.gen.alpha :as gen]
@@ -54,13 +56,16 @@
   Also, update the total number of views against the website in the
   visitor tuple."
   [db date visitor]
-  (let [website-visit-counter (apply ftup/from
-                                     (concat (take 1 visitor) (take 3 date)))
-        counter-key (fsub/pack ts-website-counter-dir website-visit-counter)]
+  (let [website-visit-counter (into (vector)
+                                    (concat (take 1 visitor) (take 3 date)))]
    (ftr/run db
      (fn [tr]
-       (fc/set tr ts-dir (apply ftup/from date) (apply ftup/from visitor))
-       (.mutate tr MutationType/ADD counter-key (bs/to-byte-array (int 1)))))))
+       (fc/set tr ts-dir date visitor)
+       (fc/mutate! tr
+                   :add
+                   ts-website-counter-dir
+                   website-visit-counter
+                   (bs/to-byte-array (int 1)))))))
 
 
 (comment
@@ -74,20 +79,14 @@
   ;; ["W7" "P33" "9fc5b6b7-654f-4ba4-9e7d-cc91559efe69"]
   (with-open [db (cfdb/open fdb)]
     (track-visitor db
-                   [2020 1 1 19 23 19]
+                   [2021 1 1 19 23 19]
                    ["W7" "P33" "9fc5b6b7-654f-4ba4-9e7d-cc91559efe69"]))
   ;; => nil
   (with-open [db (cfdb/open fdb)]
-    (fc/get-range db
-                  ts-dir
-                  (comp ftup/get-items (partial fsub/unpack ts-dir))
-                  (comp ftup/get-items ftup/from-bytes)))
+    (fc/get-range db ts-dir))
   ;; {[2020 1 1 19 23 19] ["W7" "P33" "9fc5b6b7-654f-4ba4-9e7d-cc91559efe69"]}
   (with-open [db (cfdb/open fdb)]
-    (fc/get-range db
-                  ts-website-counter-dir
-                  (comp ftup/get-items (partial fsub/unpack ts-website-counter-dir))
-                  #(bs/convert % Integer)))
+    (fc/get-range db ts-website-counter-dir {:valfn #(bs/convert % Integer)}))
   ;; {["W7" 2020 1 1] 1}
   (with-open [db (cfdb/open fdb)]
     (track-visitor db
@@ -95,21 +94,14 @@
                    ["W7" "P10" "9fc5b6b7-654f-4ba4-9e7d-cc91559efe69"]))
   ;; nil
   (with-open [db (cfdb/open fdb)]
-    (fc/get-range db
-                  ts-dir
-                  (comp ftup/get-items (partial fsub/unpack ts-dir))
-                  (comp ftup/get-items ftup/from-bytes)))
+    (fc/get-range db ts-dir))
   ;; {[2020 1 1 19 23 19] ["W7" "P33" "9fc5b6b7-654f-4ba4-9e7d-cc91559efe69"],
   ;;  [2020 1 1 20 20 20] ["W7" "P10" "9fc5b6b7-654f-4ba4-9e7d-cc91559efe69"]}
   (with-open [db (cfdb/open fdb)]
-    (fc/get-range db
-                  ts-website-counter-dir
-                  (comp ftup/get-items (partial fsub/unpack ts-website-counter-dir))
-                  #(bs/convert % Integer)))
+    (fc/get-range db ts-website-counter-dir {:valfn #(bs/convert % Integer)}))
   ;; {["W7" 2020 1 1] 2}
 
   ;; Next steps:
   ;; 1. generate lots of views,
-  ;; 2. add tests,
-  ;; 3. create API wrappings for .mutate
+  ;; 2. add tests
   )

@@ -1,4 +1,7 @@
 (ns farstar.class-scheduling
+  "Implements the Class Scheduling example from FDB documentation, as
+explained at :
+https://apple.github.io/foundationdb/class-scheduling-java.html"
   (:require [byte-streams :as bs]
             [clojure.string :as cs]
             [com.brunobonacci.mulog :as mu]
@@ -12,7 +15,7 @@
 
 (def api-version 620)
 (def fdb (cfdb/select-api-version api-version))
-(def cs-subspace (fsub/create (ftup/from "class_scheduling")))
+(def cs-subspace (fsub/create ["class_scheduling"]))
 
 (load "util")
 
@@ -26,11 +29,8 @@
                ;; Sorting here just for aesthetic purposes, this is
                ;; not part of the orignal example.
                (sorted-map)
-               (fc/get-range db
-                             cs-subspace
-                             (ftup/from "class")
-                             (comp second ftup/get-items (partial fsub/unpack cs-subspace))
-                             #(bs/convert % Integer)))))
+               (fc/get-range db cs-subspace ["class"]
+                             {:valfn #(bs/convert % Integer)}))))
 
 (defn- signup-student*
   "Internal function. Assumes all checks are cleared and we are inside
@@ -42,18 +42,9 @@
             :student-id student-id
             :class-id class-id
             :seats-left seats-left)
-    (fc/set tr
-            cs-subspace
-            (ftup/from "attends" class-id student-id)
-            (ftup/from ""))
-    (fc/set tr
-            cs-subspace
-            (ftup/from "attends" student-id class-id)
-            (ftup/from ""))
-    (fc/set tr
-            cs-subspace
-            (ftup/from "class" class-id)
-            (bs/to-byte-array seats-left))
+    (fc/set tr cs-subspace ["attends" class-id student-id] [])
+    (fc/set tr cs-subspace ["attends" student-id class-id] [])
+    (fc/set tr cs-subspace ["class" class-id] (bs/to-byte-array seats-left))
     class-id))
 
 (defn signup-student
@@ -68,20 +59,11 @@
      :class-id class-id]
     (ftr/run db
       (fn [^Transaction tr]
-        (if (fc/get tr
-                    cs-subspace
-                    (ftup/from "attends" class-id student-id)
-                    identity)
+        (if (fc/get tr cs-subspace ["attends" class-id student-id])
           (mu/log ::already-signed-up :student-id student-id :class-id class-id)
-          (let [seats-left (fc/get tr
-                                   cs-subspace
-                                   (ftup/from "class" class-id)
-                                   #(bs/convert % Integer))
-                previously-signed-up (count (fc/get-range tr
-                                                          cs-subspace
-                                                          (ftup/from "attends" student-id)
-                                                          identity
-                                                          identity))]
+          (let [seats-left (fc/get tr cs-subspace ["class" class-id]
+                                   {:valfn #(bs/convert % Integer)})
+                previously-signed-up (count (fc/get-range tr cs-subspace ["attends" student-id]))]
             (cond
               (and seats-left (pos? seats-left) (< previously-signed-up 5))
               (signup-student* tr student-id class-id seats-left)
@@ -101,20 +83,16 @@
   "Internal function. Assumes all checks are cleared and we are inside
   a transaction."
   [^Transaction tr student-id class-id]
-  (let [seats-left (fc/get tr
-                           cs-subspace
-                           (ftup/from "class" class-id)
-                           #(bs/convert % Integer))]
+  (let [seats-left (fc/get tr cs-subspace ["class" class-id]
+                           {:valfn #(bs/convert % Integer)})]
     (mu/log ::drop-student
             :level :debug
             :student-id student-id
             :class-id class-id
             :seats-left seats-left)
-    (fc/clear tr cs-subspace (ftup/from "attends" class-id student-id))
-    (fc/clear tr cs-subspace (ftup/from "attends" student-id class-id))
-    (fc/set tr
-            cs-subspace
-            (ftup/from "class" class-id)
+    (fc/clear tr cs-subspace ["attends" class-id student-id])
+    (fc/clear tr cs-subspace ["attends" student-id class-id])
+    (fc/set tr cs-subspace ["class" class-id]
             (bs/to-byte-array (int (inc seats-left))))
     class-id))
 
@@ -127,10 +105,7 @@
      :class-id class-id]
     (ftr/run db
       (fn [^Transaction tr]
-        (if (fc/get tr
-                    cs-subspace
-                    (ftup/from "attends" class-id student-id)
-                    identity)
+        (if (fc/get tr cs-subspace ["attends" class-id student-id])
           (drop-student* tr student-id class-id)
           (mu/log ::not-signed-up
                   :student-id student-id
@@ -161,9 +136,7 @@
   (mu/trace ::add-class
     [:class-id class-id
      :seats-left available-seats]
-    (fc/set db
-            cs-subspace
-            (ftup/from "class" class-id)
+    (fc/set db cs-subspace ["class" class-id]
             (bs/to-byte-array (int available-seats)))))
 
 (defn init-db
@@ -175,9 +148,9 @@
   (ftr/run db
     (fn [^Transaction tr]
       ;; Clear list of who attends which class
-      (fc/clear-range tr cs-subspace (ftup/from "attends"))
+      (fc/clear-range tr cs-subspace ["attends"])
       ;; Clear list of classes
-      (fc/clear-range tr cs-subspace (ftup/from "class"))
+      (fc/clear-range tr cs-subspace ["class"])
       ;; Add list of classes as given to us
       (doseq [c classnames]
         (add-class tr c (int 10))))))
@@ -196,33 +169,20 @@
      [:class-id class-id]
      (ftr/run db
        (fn [^Transaction tr]
-         (let [attendance-key (ftup/from "attends" class-id)
-               class-key (ftup/from "class" class-id)
-               attendee-count (count (fc/get-range tr
-                                                   cs-subspace
-                                                   attendance-key
-                                                   identity
-                                                   identity))
-               seats-left (fc/get tr
-                                  cs-subspace
-                                  class-key
-                                  #(bs/convert % Integer))]
-           (reset-class db class-id (+ attendee-count seats-left)))))))
+         (let [attendance-key ["attends" class-id]
+               class-key ["class" class-id]
+               att-count (count (fc/get-range tr cs-subspace attendance-key))
+               seats-left (fc/get tr cs-subspace class-key
+                                  {:valfn #(bs/convert % Integer)})]
+           (reset-class db class-id (+ att-count seats-left)))))))
   ([^TransactionContext db class-id available-seats]
    (mu/trace ::reset-class
      [:available-seats available-seats
       :class-id class-id]
      (ftr/run db
        (fn [^Transaction tr]
-         (doseq [s (keys (fc/get-range tr
-                                       cs-subspace
-                                       (ftup/from "attends" class-id)
-                                       #(->> %
-                                             (fsub/unpack cs-subspace)
-                                             ftup/get-items
-                                             (drop 2)
-                                             first)
-                                       identity))]
+         (doseq [s (keys (fc/get-range tr cs-subspace ["attends" class-id]
+                                       {:keyfn (comp first (partial drop 2))}))]
            (drop-student tr s class-id))
          (add-class tr class-id (int available-seats)))))))
 
@@ -234,15 +194,8 @@
     [:student-id student-id]
     (ftr/run db
       (fn [^Transaction tr]
-        (doseq [c (keys (fc/get-range tr
-                                      cs-subspace
-                                      (ftup/from "attends" student-id)
-                                      #(->> %
-                                           (fsub/unpack cs-subspace)
-                                           ftup/get-items
-                                           (drop 2)
-                                           first)
-                                      identity))]
+        (doseq [c (keys (fc/get-range tr cs-subspace ["attends" student-id]
+                                      {:keyfn (comp first (partial drop 2))}))]
           (drop-student tr student-id c))))))
 
 ;;; Testing
@@ -255,7 +208,7 @@
   (mu/trace ::perform-random-action
     [:student-id student-id
      :classes (seq my-classes)]
-    (let [all-classes (keys (available-classes db))
+    (let [all-classes (map second (keys (available-classes db)))
           action (cond
                    ;; If I have no classes, I need to signup first.
                    (= 0 (count my-classes)) :add
@@ -315,15 +268,8 @@
         (reduce (fn [my-classes _]
                   (perform-random-action db student-id my-classes))
                 ;; Pass this student's current classes in.
-                (keys (fc/get-range db
-                                    cs-subspace
-                                    (ftup/from "attends" student-id)
-                                    #(->> %
-                                          (fsub/unpack cs-subspace)
-                                          ftup/get-items
-                                          (drop 2)
-                                          first)
-                                    identity))
+                (keys (fc/get-range db cs-subspace ["attends" student-id]
+                                    {:keyfn (comp first (partial drop 2))}))
                 (range ops-per-student))))))
 
 

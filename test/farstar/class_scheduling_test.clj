@@ -6,23 +6,18 @@
             [me.vedang.clj-fdb.core :as fc]
             [me.vedang.clj-fdb.FDB :as cfdb]
             [me.vedang.clj-fdb.subspace.subspace :as fsub]
-            [me.vedang.clj-fdb.transaction :as ftr]
-            [me.vedang.clj-fdb.tuple.tuple :as ftup]))
+            [me.vedang.clj-fdb.transaction :as ftr]))
 
 (def api-version 620)
 (def fdb (cfdb/select-api-version api-version))
-(def cs-subspace (fsub/create (ftup/from "class_scheduling")))
+(def cs-subspace (fsub/create ["class_scheduling"]))
 
 
 (defn verify-students
   "No student can attend more than 5 classes. Returns a list of bad entries"
   [db student-ids]
   (reduce (fn [bad-entries student-id]
-            (let [classes (fc/get-range db
-                                        cs-subspace
-                                        (ftup/from "attends" student-id)
-                                        (comp ftup/get-items (partial fsub/unpack cs-subspace))
-                                        identity)]
+            (let [classes (fc/get-range db cs-subspace ["attends" student-id])]
               (if (> (count classes) 5)
                 (conj bad-entries student-id)
                 bad-entries)))
@@ -36,18 +31,12 @@
   (reduce (fn [bad-entries class-id]
             (ftr/read db
               (fn [tr]
-                (let [attendance-key (ftup/from "attends" class-id)
-                      class-key (ftup/from "class" class-id)
-                      attendee-count (count (fc/get-range tr
-                                                          cs-subspace
-                                                          attendance-key
-                                                          identity
-                                                          identity))
-                      seats-left (fc/get tr
-                                         cs-subspace
-                                         class-key
-                                         #(bs/convert % Integer))]
-                  (if (= 10 (+ attendee-count seats-left))
+                (let [attendance-key ["attends" class-id]
+                      class-key ["class" class-id]
+                      att (count (fc/get-range tr cs-subspace attendance-key))
+                      seats-left (fc/get tr cs-subspace class-key
+                                         {:valfn #(bs/convert % Integer)})]
+                  (if (= 10 (+ att seats-left))
                     bad-entries
                     (conj bad-entries class-id))))))
           []
@@ -80,9 +69,9 @@
     (fcs/simulate-student "1" 10)
     (with-open [db (cfdb/open fdb)]
       (is (empty? (verify-students db ["Student: 1"])))
-      (is (empty? (verify-classes db
-                                  (keys (fc/get-range db
-                                                      cs-subspace
-                                                      (ftup/from "class")
-                                                      (comp second ftup/get-items (partial fsub/unpack cs-subspace))
-                                                      identity))))))))
+      (is (->> ["class"]
+              (fc/get-range db cs-subspace)
+              keys
+              (map second)
+              (verify-classes db)
+              empty?)))))
