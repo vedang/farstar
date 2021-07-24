@@ -1,13 +1,11 @@
 # farstar
 
-A series of examples / recipes implemented in Clojure against FoundationDB.
+A series of examples / recipes implemented in Clojure against FoundationDB. This repository is meant as a demonstration of how to use [clj-fdb](https://github.com/vedang/clj_fdb). Head over there and read it's README if you want to get started quickly with the library.
 
 ## Installation
 
 1. Clone this repository.
-2. Start a REPL in this repository and open any file in the
-   `src/farstar/` folder. Follow instructions in the comment block at
-   the bottom of the file to play with the code.
+2. Start a REPL in this repository and open any file in the `src/farstar/` folder. Follow instructions in the comment block at the bottom of the file to play with the code.
 
 ## Examples / Recipes
 
@@ -20,5 +18,4 @@ The following examples / recipes are currently available:
 
 Copyright © 2018 Vedang Manerikar
 
-Distributed under the Eclipse Public License either version 1.0 or (at
-your option) any later version.
+Distributed under the Eclipse Public License either version 1.0 or (at your option) any later version.
