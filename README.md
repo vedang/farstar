@@ -13,8 +13,8 @@ A series of examples / recipes implemented in Clojure against FoundationDB.
 
 The following examples / recipes are currently available:
 
-1. [Class Scheduling](https://apple.github.io/foundationdb/class-scheduling.html):
-   Implemented at `src/farstar/class_scheduling.clj`.
+1. [Class Scheduling](https://apple.github.io/foundationdb/class-scheduling.html): Implemented at `src/farstar/class_scheduling.clj`.
+2. [Time Series](https://apple.github.io/foundationdb/time-series.html): Implemented at `src/farstar/time_series.clj`
 
 ## License
 
